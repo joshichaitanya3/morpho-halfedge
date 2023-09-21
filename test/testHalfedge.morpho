@@ -1,0 +1,175 @@
+// Unit-tests for the halfedge module
+// Requires the Morpho package unittest: https://github.com/Morpho-lang/morpho-unittest
+
+import unittest
+import meshtools
+import halfedge 
+
+class he_test is UnitTest {
+    fixture() {
+        var mb = MeshBuilder()
+
+        mb.addvertex([0,0,0])
+        mb.addvertex([-1,-1,0])
+        mb.addvertex([-1,1,0])
+        mb.addvertex([1,1,0])
+        mb.addvertex([1,-1,0])
+
+        mb.addedge([0,1])
+        mb.addedge([0,2])
+        mb.addedge([0,3])
+        mb.addedge([0,4])
+        mb.addedge([1,2])
+        mb.addedge([2,3])
+        mb.addedge([3,4])
+        mb.addedge([4,1])
+
+        mb.addface([0,1,2])
+        mb.addface([0,2,3])
+        mb.addface([0,3,4])
+        mb.addface([0,4,1])
+
+        var mesh = mb.build()
+
+        self.he_mesh = HalfEdgeMesh(mesh, ndims=2)
+
+    }
+    create_name() {
+        var he_edge = HE_edge(13,57)
+        self.assertEqual(he_edge.name,"13-57")
+
+    }
+
+} he_test()
+
+
+class he_mesh_test is UnitTest {
+    fixture() {
+        
+        self.mesh = AreaMesh(fn(u,v) [u,v,0], -1..1:1, -1..1:1)
+        self.mesh.addgrade(1)
+        self.he_mesh = HalfEdgeMesh(self.mesh, ndims=2)
+        // Show(plotmesh(self.mesh, grade=1) 
+        //     + plotmeshlabels(self.mesh, grade=[0]) 
+        //     + plotmeshlabels(self.mesh, grade=[1], color=Blue) 
+        //     + plotmeshlabels(self.mesh, grade=[2], color=Red)) 
+
+    }
+    
+    oppositeFace() {
+        self.assertEqual(self.he_mesh.getOppositeFaceFromEdge(13, 6), 7) // Face 7 is opposite face 6, with edge 13 in common.
+        self.assertEqual(self.he_mesh.getOppositeFaceFromEdge(14, 7), nil) // Boundary edge
+
+        var errorInvoked = false
+        try {
+            self.he_mesh.getOppositeFaceFromEdge(13, 0) // Face 0 is not connected to edge 13
+        } catch {
+            "BadInputError" : errorInvoked = true
+        }
+
+        self.assert(errorInvoked)
+    }
+
+    orient() {
+        var out = self.he_mesh.orient(6,4,5)
+        var orderVs = out[0]
+        var orderEs = out[1]
+        self.assertListEqual(orderVs, [4,5,7])
+        self.assertListEqual(orderEs, [8,13,11])
+
+    }
+
+    numberOfHalfEdges() {
+        self.assertEqual(self.he_mesh.he_edges.count(), self.mesh.count(1)*2)
+    }
+    
+    checkIfBoundaryVertex() {
+        for (id in [0,1,2,3,5,6,7,8]) self.assert(self.he_mesh.isBoundaryVertex(id))
+    }
+    boundaryVertices() {
+        var bdyPts = []
+        for (v in self.he_mesh.he_verts) {
+            if (v.isBoundary) {
+                var id = v.id
+                var next, nextV
+                while (id!=next) {
+                    bdyPts.append(v.id)
+                    v = v.edge.next.vert
+                    next = v.id
+                }
+                break 
+            }
+        }
+        self.assertEqual(bdyPts,[ 0, 3, 6, 7, 8, 5, 2, 1 ])
+    }
+
+    getNeighbors() {
+        var nbrs = self.he_mesh.getNeighbors(4)[0]
+        self.assertEqual(nbrs, [5,2,1,3,6,7])
+    }
+
+    getNeighborsAtBoundary() {
+        var nbrs = self.he_mesh.getNeighbors(2)[0]
+        self.assertEqual(nbrs, [1,4,5])
+    }
+
+    edgeFlipTest() {
+        var mb = MeshBuilder()
+
+        mb.addvertex([0,-1,0])
+        mb.addvertex([0,1,0])
+        mb.addvertex([-1,0,0])
+        mb.addvertex([1,0,0])
+
+        mb.addface([0,1,2])
+        mb.addface([1,0,3])
+
+        var m = mb.build()
+        m.addgrade(1)
+        var halfMesh = HalfEdgeMesh(m, ndims=2)
+
+        halfMesh.flipEdge("0-1")
+        halfMesh.export("flipped.mesh")
+        var mf = Mesh("flipped.mesh")
+        mf.addgrade(1)
+        var expMat = Matrix([[ 0, 1, 1, 0 ],
+                             [ 0, 1, 0, 1 ],
+                             [ 0, 0, 1, 1 ],
+                             [ 1, 0, 1, 0 ],
+                             [ 1, 0, 0, 1 ]])
+        var conn10 = mf.connectivitymatrix(1,0)
+        var dims = conn10.dimensions()
+        for (ix in 0...dims[0]) {
+            for (iy in 0...dims[1]) {
+                self.assertEqual(conn10[ix,iy], expMat[ix,iy])
+            }
+        }
+    }
+    
+    badEdgeFlipTest() {
+        var mb = MeshBuilder()
+
+        mb.addvertex([0,-1,0])
+        mb.addvertex([0,1,0])
+        mb.addvertex([-1,-2,0])
+        mb.addvertex([1,-1,0])
+
+        mb.addface([0,1,2])
+        mb.addface([1,0,3])
+
+        var m = mb.build()
+        m.addgrade(1)
+
+        var halfMesh = HalfEdgeMesh(m, ndims=2)
+        var errorInvoked = false
+        try {
+            halfMesh.flipEdge("0-1") 
+        } catch {
+            "BadEdgeError" : errorInvoked = true
+        }
+
+        self.assert(errorInvoked)
+
+    }
+
+} he_mesh_test()

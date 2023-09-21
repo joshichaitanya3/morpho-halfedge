@@ -1,0 +1,106 @@
+
+// Unit-tests for the area module
+// Requires the Morpho package unittest: https://github.com/Morpho-lang/morpho-unittest
+
+import unittest
+import area
+import symmetry
+import starPerpSqMeanCurvature
+import "numericalderivatives.morpho"
+
+// Mean Sq curvature
+import implicitmesh
+import plot
+import gd
+class SPSMeanCurvatureSq_test is UnitTest {
+    fixture() {
+
+        // Make a sphere
+        var impl = ImplicitMeshBuilder(fn (x,y,z) x^2+y^2+z^2-1)
+        var mesh = impl.build(stepsize=0.25)
+        self.m = HalfEdgeMesh(mesh)
+        self.lmc = SPSMeanCurvatureSq()
+    }
+
+    area_integrand() {
+
+        self.assert( abs((self.lmc.total(self.m)-8*Pi)/(8*Pi))<5e-2 )
+
+    }
+    
+    area_gradient() {
+        
+        var grad = self.lmc.gradient(self.m)
+
+        var dim = grad.dimensions()
+        var ngrad = Matrix(dim[0], dim[1])
+
+        // Manually calculate the gradient
+        var vert = self.m.vertexmatrix()
+        var eps = 1e-8
+
+        for (i in 0...dim[0]) {
+          for (j in 0...dim[1]) {
+            var v = vert[i, j]
+            vert[i, j] = v + eps
+            var fp = self.lmc.total(self.m)
+            vert[i, j] = v - eps
+            var fm = self.lmc.total(self.m)
+            ngrad[i,j] = (fp-fm)/(2*eps)
+          }
+        }
+
+        self.assert( (grad-ngrad).norm()/grad.count() < 1e-4 )
+    
+    }
+
+    symmetry() {
+        self.assumeFail = "Symmetry not yet implemented for half-edge mesh functionals"
+
+        var L = 2
+
+        var m = AreaMesh(fn (t, x) [x, cos(t), sin(t)], 0...2*Pi:2*Pi/10, -L..L:0.5, closed=[true,false])
+
+        // Add translational symmetry to the exterior vertices
+        var s = Selection(m, fn (x,y,z) abs(x-L)<1e-10 || abs(x+L)<1e-10)
+
+        var t = Translate(Matrix([2*L,0,0]))
+        m.addsymmetry(t, s)
+
+        m = HalfEdgeMesh(m)
+        // Mean Squared curvature
+        var lc = SPSMeanCurvatureSq()
+        // var lc = MeanCurvatureSq()
+        var grad = lc.gradient(m)
+
+        var dim = grad.dimensions()
+        var ngrad = Matrix(dim[0], dim[1])
+
+        // Manually calculate the gradient
+        var vert = m.vertexmatrix()
+        var eps = 1e-8
+
+        for (i in 0...dim[0]) {
+          for (j in 0...dim[1]) {
+            var v = vert[i, j]
+            vert[i, j] = v + eps
+            var fp = lc.total(m)
+            vert[i, j] = v - eps
+            var fm = lc.total(m)
+            ngrad[i,j] = (fp-fm)/(2*eps)
+          }
+        }
+
+        // Correct for symmetry vertices
+        for (i in 0..9) {
+          var sym=ngrad.column(i)+ngrad.column(80+i)
+          ngrad.setcolumn(i, sym)
+          ngrad.setcolumn(80+i, sym)
+        }
+
+        self.assert( (grad-ngrad).norm()/grad.count() < 1e-4 )
+
+    }
+} SPSMeanCurvatureSq_test()
+
+

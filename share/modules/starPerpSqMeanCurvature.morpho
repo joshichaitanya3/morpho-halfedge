@@ -1,0 +1,155 @@
+import halfedge
+import area
+import gd
+import implicitmesh
+import vtk 
+
+// Note that this implements the energy Int( 2 * H^2 ), and not Int( H^2 ),
+// using the Helfrich form 1/2 Int (kappa * (2H)^2)
+
+class SPSMeanCurvatureSq is HE_Functional {
+    init(h0=0) {
+        self.area = Area()
+        self.he_area = HE_Area()
+        self.h0 = h0
+        self.grade = 0
+        self.vZero = Matrix([0,0,0])
+        self.gradVi = Matrix([0,0,0])
+    }
+
+    integrandForElement(hMesh, id) {
+
+        // For boundary vertices, we will set this energy to be zero for now
+        if (hMesh.isBoundaryVertex(id)) return 0
+
+        self.gradA = self.he_area.gradientForVertex(hMesh, id)
+        self.gradVi.assign(self.vZero)
+        var vert = hMesh.vertexmatrix()
+        var nbrs = hMesh.getNeighbors(id)
+        var nbrVs = nbrs[0]
+        var nbrFs = nbrs[2]
+        var nc = nbrVs.count()
+        var nf = nbrFs.count()
+        for (n in 0...nc-1) {
+            self.gradVi += cross(vert.column(nbrVs[n]), vert.column(nbrVs[n+1]))
+        }
+        self.gradVi += cross(vert.column(nbrVs[nc-1]), vert.column(nbrVs[0]))
+        self.gradVi /= 6
+        var hv = 0.5 * (self.gradA.inner(self.gradVi)) / (self.gradVi.inner(self.gradVi))
+        var av = 0
+        for (fid in nbrFs) {
+            av += self.he_area.integrandForElement(hMesh, fid) / 3
+        }
+        return 2 * av * (hv - self.h0)^2
+    }
+
+    // Compute the integrand for the entire mesh.
+    // This will still have a loop over all verties, but we will speed it up a bit 
+    //by computing the area gradient in its entirity first, which will be faster.
+    integrand(hMesh) {
+    
+        var nv = hMesh.mesh.count()
+        var vert = hMesh.vertexmatrix()
+        var out = Matrix(nv)
+        var gradA = self.he_area.gradient(hMesh)
+        var intA = self.he_area.integrand(hMesh)
+        var vZero = Matrix([0,0,0])
+        var gradVi = Matrix([0,0,0])
+        var nc, nf, hv, av
+        for (id in 0...nv) {
+            // out[id] = self.integrandForElement(hMesh, id)
+            if (hMesh.isBoundaryVertex(id)) {
+                out[id] = 0
+                continue
+            }
+            gradVi.assign(vZero)
+
+            var nbrs = hMesh.getNeighbors(id)
+            var nbrVs = nbrs[0]
+            var nbrFs = nbrs[2]
+            nc = nbrVs.count()
+            nf = nbrFs.count()
+            for (n in 0...nc-1) {
+                gradVi += cross(vert.column(nbrVs[n]), vert.column(nbrVs[n+1]))
+            }
+            gradVi += cross(vert.column(nbrVs[nc-1]), vert.column(nbrVs[0]))
+
+            gradVi /= 6
+            hv = 0.5 * (gradA.column(id).inner(gradVi)) / (gradVi.inner(gradVi))
+            av = 0
+            for (fid in nbrFs) {
+                av += intA[fid] / 3
+            }
+
+            out[id] = 2 * av * (hv - self.h0)^2
+
+        }
+
+        return out
+    }
+
+    gradient(hMesh) {
+        var nv = hMesh.mesh.count()
+        self.vert = hMesh.vertexmatrix()
+
+        var dim = self.vert.dimensions()[0]
+        var frc = Matrix(dim, nv)
+        var el
+        var eps = 1e-10
+        var v, v0, f0, fp, fm
+
+        // This recipe is directly following the C-code for numerical gradients of functionals.
+        // The comments before each morpho line is the equivalent C line in functionals.c
+
+        // Loop over vertices in element
+        for (j in 0...nv) {
+            // Loop over coordinates
+            for (k in 0...dim) {
+
+                // matrix_getelement(frc, k, vid[j], &f0);
+                f0 = frc[k, j]
+                // matrix_getelement(mesh->vert, k, vid[j], &x0);
+                v0 = self.vert.column(j)
+                v = v0.clone()
+                // matrix_setelement(mesh->vert, k, vid[j], x0+eps);
+                v[k] = v0[k] + eps
+                self.vert.setcolumn(j, v)
+                // if (!(*integrand) (v, mesh, i, nv, vid, ref, &fp)) return false;
+
+                // fp = self.integrandfn(mesh, j)
+                fp = self.integrandForElement(hMesh, j)
+                for (nbr in hMesh.getNeighbors(j)[0]) {
+                    fp += self.integrandForElement(hMesh, nbr)
+                }
+                // fp = self.total(hMesh)
+                
+                // matrix_setelement(mesh->vert, k, vid[j], x0-eps);
+                v[k] = v0[k] - eps
+                self.vert.setcolumn(j, v)
+                // if (!(*integrand) (v, mesh, i, nv, vid, ref, &fm)) return false;
+                // fm = self.integrandfn(mesh, j)
+
+                fm = self.integrandForElement(hMesh, j)
+                for (nbr in hMesh.getNeighbors(j)[0]) {
+                    fm += self.integrandForElement(hMesh, nbr)
+                }
+                // fm = self.total(hMesh)
+                
+                // matrix_setelement(mesh->vert, k, vid[j], x0);
+                self.vert.setcolumn(j, v0)
+                // matrix_setelement(frc, k, vid[j], f0+(fp-fm)/(2*eps));
+                frc[k, j] = f0+(fp-fm)/(2*eps)
+            }
+
+            // var s = Selection(mesh, boundary=true)
+            // s.addgrade(0)
+            // for (id in s.idlistforgrade(0)) frc.setcolumn(id, Matrix([0,0,0]))
+        }
+        return frc
+    }
+
+    total(hMesh) {
+        return self.integrand(hMesh).sum()
+    }
+
+}

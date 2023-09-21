@@ -1,0 +1,657 @@
+import meshtools
+import plot 
+import vtk 
+
+fn cross(a, b) {
+    return Matrix([ a[1]*b[2]-a[2]*b[1],
+                    a[2]*b[0]-a[0]*b[2],
+                    a[0]*b[1]-a[1]*b[0] ])
+}
+
+/* The core half-edge object. 
+ 
+ It is initialized by providing the (directed) starting (v0id) and ending (v1id) vertex of the edge.
+ The initialization will also create a `name` for the half edge: v0id-v1id
+ For now, we store the following:
+    * vertex id of the base of the edge: v0id 
+    * vertex id of the end of the edge: v1id
+    * HE_vert object for the base of the edge: vert
+    * Twin HE_edge: twin
+    * Next HE_edge: next
+    * HE_face that the HE_edge belongs to : face 
+    * id of the corresponding Morpho edge: eid
+    * Flag to indicate whether it is a boundary edge: isBoundary
+
+NOTE ON HOW WE HANDLE BOUNDARIES: By simply assigning consistent orientations to the 
+edges of all facets in an orientable mesh, each non-boundary half-edge would have a twin by 
+definition. However, this leaves the boundary half-edges without twins. This makes processing boundaries harder, as there is no way to traverse the boundary efficiently. 
+We solve this problem by creating twin edges even for the boundary edges. This way, all half-edges have twins. Further, we assign the property `isBoundary` to be `true` for all the boundary vertices and both the inner and outer boundary half-edges. Lastly, we set the half-edge belonging to a boundary vertex to be the outer edge starting from that vertex. This allows us to set `next` relations for the outer boundary edges nicely, linking all the boundary points in order. The only differentiating property of a boundary half-edge is that we don't assign a face to it, since there is none. Thus, `face` is `nil` for an outer boundary edge.
+
+*/
+class HE_edge {
+    init(v0id, v1id) {
+
+        self.v0id = v0id // vertex id of the base of the edge
+        self.v1id = v1id // vertex id of the end of the edge
+        self.vert = nil // HE_vert();   // vertex at the beginning of the half-edge
+        self.twin = nil // HE_edge();   // oppositely oriented adjacent half-edge 
+        self.next = nil // HE_edge();   // next half-edge around the face
+        self.face = nil // HE_face();   // face the half-edge borders
+        self.eid = nil // id of Morpho edge
+        self.isBoundary = false
+        self.createName()
+    }
+
+    createName() {
+        self.name = "${self.v0id}-${self.v1id}"
+    }
+} 
+
+// The half-edge vertex object. It stores its id, one of the half-edges emanatating from it, and a flag to indicate whether it is a boundary vertex. If it is a boundary vertex, then its half-edge is always set to be the outer boundary edge originating from it.
+class HE_vert {
+
+    init(id) {
+        self.id = id
+        self.edge = nil // HE_edge() // one of the half-edges emanatating from the vertex
+        self.isBoundary = false
+    }
+} 
+
+// THe half-edge face object. It stores the face id and one of the half-edges of the face.
+// It provides a `vids` method that uses the half-edge to get an ordered list of the vertices belonging to that face.
+class HE_face {
+
+    init(id) {
+        self.id = id
+        self.edge = nil // HE_edge();  // one of the half-edges bordering the face
+        self.vids = nil
+    }
+    vids() {
+
+        self.vids = []
+        self.vids.append(self.edge.vert.id)
+        self.vids.append(self.edge.next.vert.id)
+        self.vids.append(self.edge.next.next.vert.id)
+        return self.vids
+
+    }
+
+} 
+
+// The main HalfEdgeMesh class
+class HalfEdgeMesh {
+    init(mesh, ndims = 3) {
+        self.mesh = mesh
+        self.ndims = ndims
+        self.vert = mesh.vertexmatrix()
+        var mg = mesh.maxgrade()
+        mesh.addgrade(1)
+        self.conn02 = mesh.connectivitymatrix(0,2)
+        self.conn12 = mesh.connectivitymatrix(1,2)
+        self.conn21 = mesh.connectivitymatrix(2,1)
+        self.conn10 = mesh.connectivitymatrix(1,0)      
+        
+        // We will store the HalfEdge vertices and faces in a list, 
+        // ordering them in the same way the base mesh has them ordered.
+
+        // This might change when we allow refinement?
+
+        self.he_verts = []
+        self.he_faces = []
+
+        // We will store the half-edges themselves in a Dictionary object,
+        // since we will need to remove and add edges in case of edge-flips.
+        self.he_edges = Dictionary()
+
+        // Add vertices to the list
+        for (vid in 0...mesh.count()) {
+            self.he_verts.append(HE_vert(vid))
+        }
+        
+        // Now, assign a consistent orientation to all the faces. 
+        // This will not catch inconsistent orientations at this stage, but 
+        // creating the half-edges later would break.
+
+        self.orderAllFaces()
+        // This method generates two dictionaries: vertexOrientations and edgeOrientations.
+        // Given a face id as a key, they return an order in which the vertices and edges, respectively,
+        // of that face are oriented. We will use these dictionaries in the following.
+
+        // Loop through all the faces and define all the half edges and faces
+        // This sets up the `next` relations, but not `twin` relations. That will
+        // be done later after looping through the edges
+        var out, vids, eids, he_edge0, he_edge1, he_edge2, he_face
+        
+        for (fid in 0...mesh.count(2)) {
+
+            // Get the order in which the vertices and the edges for this face are oriented
+            vids = self.vertexOrientations[fid]
+            eids = self.edgeOrientations[fid]
+            
+            // Now, create the HE_face object, and the corresponding three half-edges for this face
+            he_face = HE_face(fid)
+            he_face.vids = vids 
+            
+            he_edge0 = HE_edge(vids[0], vids[1])
+            he_edge0.vert = self.he_verts[vids[0]]
+            he_edge0.eid = eids[0]
+
+            he_face.edge = he_edge0 // Set the edge0 as the edge for this face
+            self.he_faces.append(he_face) // Add this face to the list of HE_faces
+
+            he_edge0.face = he_face
+            self.he_verts[vids[0]].edge = he_edge0
+
+            he_edge1 = HE_edge(vids[1], vids[2])
+            he_edge1.vert = self.he_verts[vids[1]]
+            he_edge1.eid = eids[1]
+
+            he_edge1.face = he_face
+            self.he_verts[vids[1]].edge = he_edge1
+
+
+            he_edge2 = HE_edge(vids[2], vids[0])
+            he_edge2.vert = self.he_verts[vids[2]]
+            he_edge2.eid = eids[2]
+
+            he_edge2.face = he_face
+            self.he_verts[vids[2]].edge = he_edge2
+
+            // Set the "next" relations
+            he_edge0.next = he_edge1
+            he_edge1.next = he_edge2
+            he_edge2.next = he_edge0
+
+            // Add the half edges to the dictionary. 
+            // For an orientable mesh, we will be visiting each half-edge only once in this loop.
+            // Hence, if we visit a half-edge twice, the mesh is not orientable and we throw an error.
+            var nonOrientableError = Error("NonOrientable", "The input mesh is not orientable!")
+            var e01 = he_edge0.name
+            var e12 = he_edge1.name
+            var e20 = he_edge2.name
+            
+            if (self.he_edges.contains(e01)) {
+                print "Edge ${e01} already exists!"
+                nonOrientableError.throw()
+            }
+            self.he_edges[e01] = he_edge0
+
+            if (self.he_edges.contains(e12)) {
+                print "Edge ${e12} already exists!"
+                nonOrientableError.throw()
+            }
+            self.he_edges[e12] = he_edge1
+
+            if (self.he_edges.contains(e20)) {
+                print "Edge ${e20} already exists!"
+                nonOrientableError.throw()
+            }
+            self.he_edges[e20] = he_edge2
+
+            // Now, we check for the twin edges and set up the relations
+            
+            if (self.he_edges.contains("${vids[1]}-${vids[0]}")) {
+                self.he_edges["${vids[0]}-${vids[1]}"].twin = self.he_edges["${vids[1]}-${vids[0]}"]
+                self.he_edges["${vids[1]}-${vids[0]}"].twin = self.he_edges["${vids[0]}-${vids[1]}"]
+            }
+            if (self.he_edges.contains("${vids[2]}-${vids[1]}")) {
+                self.he_edges["${vids[1]}-${vids[2]}"].twin = self.he_edges["${vids[2]}-${vids[1]}"]
+                self.he_edges["${vids[2]}-${vids[1]}"].twin = self.he_edges["${vids[1]}-${vids[2]}"]
+            }
+            if (self.he_edges.contains("${vids[0]}-${vids[2]}")) {
+                self.he_edges["${vids[2]}-${vids[0]}"].twin = self.he_edges["${vids[0]}-${vids[2]}"]
+                self.he_edges["${vids[0]}-${vids[2]}"].twin = self.he_edges["${vids[2]}-${vids[0]}"]
+            }
+        }
+
+        // Now, check for boundary edges. These would be the ones that don't have a twin edge yet. 
+        // For these, we will set the isBoundary flag for the edges and corresponding vertices to be true.
+        // Further, we will create the twin edges anyway, and just leave their faces as nil.
+        var current, v0, v1
+        for (halfEdgeName in self.he_edges.keys()) {
+            current = self.he_edges[halfEdgeName]
+            v0 = current.v0id
+            v1 = current.v1id
+            if (isnil(current.twin)) {
+                // This means that it is a boundary edge.
+                self.he_verts[v0].isBoundary = true
+                self.he_verts[v1].isBoundary = true
+                current.isBoundary = true
+
+                // Create the twin half-edge
+                var newHE = HE_edge(v1, v0)
+                newHE.vert = self.he_verts[v1]
+                newHE.twin = current
+                newHE.isBoundary = true
+                // Add this twin half-edge to the Dictionary
+                self.he_edges[newHE.name] = newHE
+                // Set the twin relation
+                current.twin = newHE
+                // For boundary vertices, set the boundary half edge originating from it to be the default edge.
+                // Set the half-edge for the base vertex (v1) to be this new outer half-edge.
+                self.he_verts[v1].edge = newHE 
+            }
+            
+        }
+
+        // Now that the boundary half-edges are created, we will fix the "next" connections using the fact that all the boundary vertices have their edge as the boundary edge.
+        for (halfEdgeName in self.he_edges) {
+            current = self.he_edges[halfEdgeName]
+            // Now, we only want the outer boundary edge. They can be identified by the fact that their `face` is `nil` by definition.
+            if (isnil(current.face)) {
+                // The `next` half-edge for the outer boundary edge is the outer-boundary edge originating from current's v1id, which we have conveniently set to be the v1id's HE_vert's edge.
+                current.next = self.he_verts[current.v1id].edge
+            }
+        }
+
+        // This concludes the setting of all the connectivities in the mesh!
+
+    }
+    
+    isBoundaryVertex(vid) {
+        return self.he_verts[vid].isBoundary
+    }
+
+    isBoundaryEdge(eid) {
+        return self.he_edges[eid].isBoundary
+    }
+
+    vertexmatrix() {
+        return self.mesh.vertexmatrix()
+    }
+
+    setvertexmatrix(vert) {
+        self.mesh.setvertexmatrix(vert)
+    }
+
+    // Old method to order faces based on global relation to radial or z direction.
+    // Right now, it is only used to orient the first triangle. 
+    // For the rest, it has been replaced by orderAllFaces(), which assigns
+    // a consistent orientation to all faces based on the orientation of the first face.
+    __orderFace(fid) {
+        var vids = self.conn02.rowindices(fid)
+        var v0 = self.vert.column(vids[0])
+        var v1 = self.vert.column(vids[1])
+        var v2 = self.vert.column(vids[2])
+
+        var e0s = self.conn10.rowindices(vids[0])
+        if (isnil(e0s)) {
+            print "Face ${fid}, vertex ${v0}"
+        }
+        var e0sDict = Dictionary()
+        for (eid in e0s) e0sDict[eid] = true
+        var e1s = self.conn10.rowindices(vids[1])
+        var e1sDict = Dictionary()
+        for (eid in e1s) e1sDict[eid] = true
+        var e2s = self.conn10.rowindices(vids[2])
+        var e2sDict = Dictionary()
+        for (eid in e2s) e2sDict[eid] = true
+
+        var e0 = Int(e0sDict.intersection(e1sDict).keys()[0])
+        var e1 = Int(e1sDict.intersection(e2sDict).keys()[0])
+        var e2 = Int(e2sDict.intersection(e0sDict).keys()[0])
+
+        var eids = [e0, e1, e2]
+
+        // print ("Order of edges for vertices ${vids}: ${[e0,e1,e2]}")
+        
+        var vm = (v0+v1+v2)/3
+        var v10 = v1-v0
+        var v20 = v2-v0
+        if (self.ndims==3) {
+            if ((cross(v10,v20).inner(vm))>0) return [vids, eids] 
+        }
+        else if ((v10[0]*v20[1] - v10[1]*v20[0])>0) return [vids, eids] 
+        return [ [vids[1], vids[0], vids[2]], [e0, e2, e1] ]
+    }
+
+    getFacesFromEdge(eid) {
+        return self.conn12.rowindices(eid)
+    }
+
+    getOppositeFaceFromEdge(eid, fid) {
+        var faces = self.conn21.rowindices(eid)
+        if (faces.count()==1) return nil
+        if (faces[0]==fid) return faces[1]
+        if (faces[1]==fid) return faces[0]
+        Error("BadInputError", "Face ${fid} is not connected to edge ${eid}").throw()
+    }
+    // This method will start by assigning a random orientation to a triangle. It will then assign 
+    // consistent orientations to all its neighbors recursively, until it has covered all triangles. If,
+    // at any given triangle, the orientation ends up being inconsistent, the half-edge creation later on will fail,
+    // resulting in an error, indicating that the mesh is not orientable (for example, a Mobius strip mesh).
+    orderAllFaces() {
+        self.vertexOrientations = Dictionary()
+        self.edgeOrientations = Dictionary()
+        var currentFaceId = 0
+        if (self.mesh.count()>10) currentFaceId = 13
+        self.faceCount = 0
+        var order = self.__orderFace(currentFaceId) // Order for the first face
+        var orderVs = order[0]
+        var orderEs = order[1]
+        self.faceCount += 1
+        self.vertexOrientations[currentFaceId] = orderVs
+        self.edgeOrientations[currentFaceId] = orderEs
+
+        // Now, recursively assign consistent orientations to all neighboring triangles using a Breadth-First-Search (BFS)-like algorithm.
+        // (The List.pop() method in Morpho pops the last element and not the first, so it is going to be a slightly modified BFS)
+        var queue = [currentFaceId]
+        while (queue.count()>0) {
+            currentFaceId = queue.pop()
+            orderVs = self.vertexOrientations[currentFaceId]
+            orderEs = self.edgeOrientations[currentFaceId]
+            for (eid, j in orderEs) {
+                var oppFace = self.getOppositeFaceFromEdge(eid, currentFaceId)
+                if (isnil(oppFace)) continue
+                else if (self.vertexOrientations.contains(oppFace)) continue
+                else {
+                    var order = self.orient(oppFace, orderVs[mod(j+1,3)], orderVs[j])
+                    self.faceCount += 1
+                    self.vertexOrientations[oppFace] = order[0]
+                    self.edgeOrientations[oppFace] = order[1]
+                    queue.append(oppFace)
+                }
+            }
+        }
+
+    }
+
+    // Orient a face with the id "fid", given the first two vertices v0 and v1
+    orient(fid, v0, v1) {
+        var vids = self.conn02.rowindices(fid)
+        var v2 = 0
+        for (vid in vids) {
+            if (vid!=v0 && vid!=v1) v2 = vid
+        }
+
+        vids = [v0, v1, v2]
+        var e0s = self.conn10.rowindices(v0)
+        if (isnil(e0s)) {
+            print "Face ${fid}, vertex ${v0}"
+        }
+        var e0sDict = Dictionary()
+        for (eid in e0s) e0sDict[eid] = true
+        var e1s = self.conn10.rowindices(v1)
+        var e1sDict = Dictionary()
+        for (eid in e1s) e1sDict[eid] = true
+        var e2s = self.conn10.rowindices(v2)
+        var e2sDict = Dictionary()
+        for (eid in e2s) e2sDict[eid] = true
+
+        var e0 = Int(e0sDict.intersection(e1sDict).keys()[0])
+        var e1 = Int(e1sDict.intersection(e2sDict).keys()[0])
+        var e2 = Int(e2sDict.intersection(e0sDict).keys()[0])
+
+        var eids = [e0, e1, e2]
+
+        return [vids, eids] 
+        
+    }
+    getNeighbors(vid) {
+        var v = self.he_verts[vid] // Get the Vertex
+        var e = v.edge // Get an edge for this vertex
+        var name = e.name.clone()
+        // print name
+        var neighborVs = []
+        var neighborEs = []
+        var neighborFs = []
+        // print "Starting with edge ${name}..."
+        while (true) {
+            if (!isnil(e.face)) neighborFs.append(e.face.id)
+            var etwin = e.twin 
+            // print "its twin is ${etwin.name}"
+            neighborVs.append(etwin.vert.id)
+            neighborEs.append(etwin.eid)
+            e = etwin.next
+            // print "Its next is ${e.name}"
+            if (e.name == name) break
+        }
+        return [neighborVs, neighborEs, neighborFs]
+    }
+    getNeighborsOfEdge(eid) {
+        /* Get all the vertices whose energy will be affected by flipping the edge 01
+           The orientation of the faces is counter-clockwise (0-1-2, 1-0-3)
+               1              1
+              /|\              /\
+             / | \            /f0\
+          2 /f0|f1\ 3  --> 2 /____\ 3
+            \  |  /          \    /
+             \ | /            \f1/
+              \|/              \/
+               0               0  
+        */
+
+        // if (!self.he_edges.contains("${id0}-${id1}")) Error("EdgeNotFound", "Requested edge does not exist!").throw()
+        // var e01 = self.he_edges["${id0}-${id1}"]
+        
+        if (!self.he_edges.contains(eid)) Error("EdgeNotFound", "Requested edge does not exist!").throw()
+        var e01 = self.he_edges[eid]
+        var id0 = e01.vert.id
+        var id1 = e01.next.vert.id
+
+        if (self.he_edges[eid].isBoundary) Error("BoundaryEdge", "Cannot flip an edge at the boundary!").throw()
+        var e10 = self.he_edges["${id1}-${id0}"]
+
+        var v0 = e01.vert 
+        var v1 = e10.vert 
+
+        var f0 = e01.face 
+        var f1 = e10.face
+
+        // Collect all the edges
+        var e12 = e01.next 
+        var e20 = e12.next 
+        var e03 = e10.next 
+        var e31 = e03.next 
+
+        // Get vertices of the new edge
+        var v2 = e20.vert
+        var v3 = e31.vert
+
+        var neighborhood = Dictionary()
+
+        var quadVerts = [v0.id, v1.id, v2.id, v3.id]
+
+        for (qv in quadVerts) {
+            neighborhood["${qv}"] = true
+            for (nbr in self.getNeighbors(qv)[0]) {
+                neighborhood["${nbr}"] = true
+            }
+        }
+
+        // var nbrStrs = neighborhood.keys()
+        var nbrs = []
+        for (key in neighborhood.keys()) nbrs.append(Int(key))
+        return nbrs
+
+    }
+
+    genMesh() {
+        var mb = MeshBuilder()
+        for (id in 0...self.mesh.count()) mb.addvertex(self.mesh.vertexposition(id))
+        for (face in self.he_faces) mb.addface(face.vids())
+
+        var m = mb.build()
+        return m
+    }
+
+    export(filename) {
+
+        var m = self.genMesh()
+
+        m.save(filename)
+
+    }
+
+    exportVTK(filename) {
+
+        var m = self.genMesh()
+        try {
+            VTKExporter(m).export(filename)
+        } catch {
+            "IndxBnds" : Show(plotmesh(m, grade=[0,2]))
+        }
+
+    }
+
+    // flipEdge(id0, id1) {
+    flipEdge(eid, debug=false) {
+        /* Flipping the edge 01
+           The orientation of the faces is counter-clockwise (0-1-2, 1-0-3)
+               1              1
+              /|\              /\
+             / | \            /f0\
+          2 /f0|f1\ 3  --> 2 /____\ 3
+            \  |  /          \    /
+             \ | /            \f1/
+              \|/              \/
+               0               0  
+        */
+
+        // if (!self.he_edges.contains("${id0}-${id1}")) Error("EdgeNotFound", "Requested edge does not exist!").throw()
+        // var e01 = self.he_edges["${id0}-${id1}"]
+        
+        if (!self.he_edges.contains(eid)) Error("EdgeNotFound", "Requested edge does not exist!").throw()
+        var e01 = self.he_edges[eid]
+        var edgeId = e01.eid
+        var id0 = e01.vert.id
+        var id1 = e01.next.vert.id
+
+        if (self.he_edges[eid].isBoundary) Error("BoundaryEdge", "Cannot flip an edge at the boundary!").throw()
+        var e10 = self.he_edges["${id1}-${id0}"]
+
+        var v0 = e01.vert 
+        var v1 = e10.vert 
+
+        var f0 = e01.face 
+        var f1 = e10.face
+
+        if (debug) {
+            print "Original faces: ${f0.vids()}, ${f1.vids()}"
+        }
+        // Collect all the edges
+        var e12 = e01.next 
+        var e20 = e12.next 
+        var e03 = e10.next 
+        var e31 = e03.next 
+
+        // Get vertices of the new edge
+        var v2 = e20.vert
+        var v3 = e31.vert
+
+        if (debug) {
+            print "Current vertices: ${v0.id}-${v1.id}"
+            print "Opposite vertices: ${v2.id}-${v3.id}"
+        }
+
+        // Test whether any edge has a total angle greater than a limit.
+        // The ideal limit for flat geometries is 180 degrees, but practically, it might be better to have a smaller one,
+        // especially when curved surfaces are involved.
+        var angleLimit = 0.7*Pi
+
+        var badEdgeError = Error("BadEdgeError", "Flipping this edge would create overalapping traingles.")
+        var vert = self.vertexmatrix()
+        var pos0 = vert.column(v0.id)
+        var pos1 = vert.column(v1.id)
+        var pos2 = vert.column(v2.id)
+        var pos3 = vert.column(v3.id)
+
+        var l01 = (pos1-pos0).norm()
+        var l02 = (pos2-pos0).norm()
+        var l03 = (pos3-pos0).norm()
+        var l12 = (pos2-pos1).norm()
+        var l13 = (pos3-pos1).norm()
+
+        var a201 = acos( (l02^2 + l01^2-l12^2)/(2*l02*l01) ) // Angle 201
+        var a301 = acos( (l03^2 + l01^2-l13^2)/(2*l03*l01) ) // Angle 301
+
+        if (a201 + a301 >= angleLimit) {
+            // print "a201 = ${a201}"
+            // print "a301 = ${a301}"
+            // print "Total is greater than Pi"
+            badEdgeError.throw()
+        }
+
+        var a210 = acos( (l12^2 + l01^2-l02^2)/(2*l12*l01) ) // Angle 210
+        var a310 = acos( (l13^2 + l01^2-l03^2)/(2*l13*l01) ) // Angle 310
+
+        if (a210 + a310 >= angleLimit) {
+            // print "a210 = ${a210}"
+            // print "a310 = ${a310}"
+            // print "Total is greater than Pi"
+            badEdgeError.throw()
+        } 
+
+        // Double-check the potentially flipped edge too
+        var l23 = (pos3-pos2).norm()
+
+        var a123 = acos( (l12^2 + l23^2-l13^2)/(2*l12*l23) ) // Angle 123
+        var a320 = acos( (l23^2 + l02^2-l03^2)/(2*l23*l02) ) // Angle 320
+
+        if (a123 + a320 >= angleLimit) {
+            // print "Ending due to bad flipped edge"
+            badEdgeError.throw()
+        } 
+
+        var a132 = acos( (l13^2 + l23^2-l12^2)/(2*l13*l23) ) // Angle 132
+        var a230 = acos( (l23^2 + l03^2-l02^2)/(2*l23*l03) ) // Angle 230
+
+        if (a132 + a230 >= angleLimit) {
+            // print "Ending due to bad flipped edge"
+            badEdgeError.throw()
+        }
+
+        // Since this edge will disappear, set the edges for f0 and f1 to be e01.next and e10.next respectively
+        f0.edge = e12 // Looks good
+        f1.edge = e03 // Looks good
+        /* Similarly, set the edges for the vertices v0 and v1 to be e1.next and e0.next respectively as well,
+         just in case the saved edge for these vertices were either e0 or e1
+         (Note the switch: The new edge for v0 is e1.next, not e0.next)
+        */
+        e01.vert.edge = e03 // Looks good
+        e10.vert.edge = e12 // Looks good
+
+        // Generate new edges
+        var e23 = HE_edge(v2.id, v3.id)
+        e23.vert = v2
+        e23.face = f0
+        e23.eid = edgeId
+
+        var e32 = HE_edge(v3.id, v2.id)
+        e32.vert = v3
+        e32.face = f1
+        e32.eid = edgeId
+
+        // Now, reset all the next and twin relations
+        e23.twin = e32
+        e32.twin = e23
+
+        e12.next = e23
+        e23.next = e31
+        e31.next = e12
+
+        e03.next = e32
+        e32.next = e20
+        e20.next = e03
+
+        // Reset the face links
+        e31.face = f0 
+        e12.face = f0 
+
+        e20.face = f1 
+        e03.face = f1
+        if (debug) {
+            print "Final faces: ${f0.vids()}, ${f1.vids()}"
+        }
+        // Finally, add the new half-edges and remove the old ones 
+        self.he_edges.remove("${v0.id}-${v1.id}")
+        self.he_edges.remove("${v1.id}-${v0.id}")
+
+        self.he_edges["${v2.id}-${v3.id}"] = e23 
+        self.he_edges["${v3.id}-${v2.id}"] = e32 
+
+        return true
+
+    }
+}
+
