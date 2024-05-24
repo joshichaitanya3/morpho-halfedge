@@ -1,0 +1,136 @@
+// This module implements the area functional "HE_Area" for half-edge meshes
+
+import halfedge
+import optimize 
+import plot 
+
+// The HE_Functional class.
+// This implements some common functional methods suitable for half-edge meshes,
+// like computing the total integrand for the star of a vertex, or for all the 
+// elements involved while flipping a certain edge.
+class HE_Functional {
+
+    // Computes the total integrand for the elements associated with 
+    // the star of vertex vid.
+    integrandForStar(hMesh, vid) {
+
+        var out = self.integrandForElement(hMesh, vid)
+        for (nbr in hMesh.getNeighbors(vid)[0]) {
+            out += self.integrandForElement(hMesh, nbr)
+        }
+        return out
+    }
+
+    // Computes the total integrand for the elements associated with 
+    // the faces connected to the edge eid
+    integrandForFlip(hMesh, eid) {
+        var nbrs = hMesh.getNeighborsOfEdge(eid)
+        var out = 0
+        for (nbr in nbrs) {
+            out += self.integrandForElement(hMesh, nbr)
+        }
+        return out
+    }
+}
+
+// The Area functional for HalfEdge meshes.
+class HE_Area is HE_Functional {
+    init(hMesh=nil) {
+        self.grade = 2
+        self.hMesh = hMesh 
+    }
+
+    // The integrandForElement method.
+    // Returns the area of the face with face id fid.
+    integrandForElement(hMesh, fid) {
+        var face = hMesh.he_faces[fid]
+        var vids = face.vids()
+        var v0 = hMesh.mesh.vertexposition(vids[0])
+        var v1 = hMesh.mesh.vertexposition(vids[1])
+        var v2 = hMesh.mesh.vertexposition(vids[2])
+
+        var a = cross(v1-v0, v2-v0)
+        return 0.5 * a.norm()
+    }
+    
+    integrand(mesh) {
+        var hMesh = self.hMesh
+        if (isnil(hMesh)) hMesh = HalfEdgeMesh(mesh)
+        // var hMesh = HalfEdgeMesh(mesh)
+        var nf = hMesh.mesh.count(2)
+        var vert = hMesh.mesh.vertexmatrix()
+        var out = Matrix(nf) 
+        var face, v0, v1, v2, vids, a
+        for (fid in 0...nf) {
+            out[fid] = self.integrandForElement(hMesh, fid)
+        }
+        return out
+    }
+
+    gradientForFace(hMesh, vids, scale=1) {
+        var v0 = hMesh.mesh.vertexposition(vids[0])
+        var v1 = hMesh.mesh.vertexposition(vids[1])
+        var v2 = hMesh.mesh.vertexposition(vids[2])
+
+        var a = cross(v1-v0, v2-v0)
+
+        var s0 = v1 - v0
+        var s1 = v2 - v1
+
+        var s01 = cross(s0, s1)
+        var norm = s01.norm()
+        // if (norm<1e-12) return false
+
+        var s010 = cross(s01, s0)
+        var s011 = cross(s01, s1)
+
+        var out = [nil, nil, nil]
+        out[0] = (0.5/norm*scale * s011)
+        out[2] = (0.5/norm*scale * s010)
+        out[1] = (-0.5/norm*scale * (s010 + s011))
+        return out
+    }
+
+    gradientForVertex(hMesh, vid) {
+        var v = hMesh.he_verts[vid]
+        var nbrs = hMesh.getNeighbors(vid)
+        var faces = nbrs[2]
+        var gradFace, gradForVert
+        for (fid in faces) {
+            var face = hMesh.he_faces[fid]
+            var vids = face.vids()
+            gradFace = self.gradientForFace(hMesh, vids)
+            if (vids[0]==vid) gradForVert += gradFace[0]
+            else if (vids[1]==vid) gradForVert += gradFace[1]
+            else gradForVert += gradFace[2]
+
+        }
+        return gradForVert
+    }
+
+    gradient(mesh) {
+        var hMesh = self.hMesh
+        if (isnil(hMesh)) hMesh = HalfEdgeMesh(mesh)
+        var nv = hMesh.mesh.count(0)
+        var out = Matrix(3, nv)
+        var nf = hMesh.mesh.count(2)
+        var vert = hMesh.mesh.vertexmatrix()
+        var outF
+        for (fid in 0...nf) {
+            var face = hMesh.he_faces[fid]
+            var vids = face.vids()
+            outF = self.gradientForFace(hMesh, vids)
+            for (k in 0...3) {
+                out[k,vids[0]] += outF[0][k]
+                out[k,vids[1]] += outF[1][k]
+                out[k,vids[2]] += outF[2][k]
+            }
+        }
+        return out
+    }
+
+    total(mesh) {
+        return self.integrand(mesh).sum()
+    }
+}
+
