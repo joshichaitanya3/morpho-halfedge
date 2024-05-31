@@ -1,0 +1,43 @@
+// Half edge mesh thermalizer
+
+import optimize
+import meshgen
+import "halfedge.morpho"
+import "starPerpSqMeanCurvature.morpho"
+import "area.morpho"
+import "thermalizer.morpho"
+import gd 
+
+var impl = ImplicitMeshBuilder(fn (x,y,z) x^2+y^2+z^2-1)
+var mesh = impl.build(stepsize=0.25)
+
+// var dom = fn (x) -(x[0]^2+x[1]^2-1)
+// var mg = MeshGen(dom, [-1..1:0.2, -1..1:0.2])
+// var mesh = mg.build()
+// mesh = ChangeMeshDimension(mesh, 3)
+mesh.addgrade(1)
+
+// Show(plotmesh(mesh, grade=1) + plotmeshlabels(mesh) + plotmeshlabels(mesh, grade=2, color=Red))
+// var mesh = GD(2,2).mesh()
+// Get average length of a bond. 
+// This can be used to set the size of random perturbations.
+var lens = Length().integrand(mesh)
+var l0 = lens.sum()/lens.count()
+print "l0 = ${l0}"
+
+// Show(plotmesh(mesh, grade=1))
+var hMesh = HalfEdgeMesh(mesh)
+// var hMesh = HalfEdgeMesh(mesh, ndims=2)
+
+var therm = Thermalizer(hMesh, kappa=1e2)
+
+print "Number of beads: ${mesh.count(0)}"
+print "Number of bonds: ${mesh.count(1)}"
+var nsteps = 10000
+for (i in 0...nsteps) {
+    // nsuccesses = thermalizer.monteCarloStep(i, s=l0/10) // This step size s has chosen such that the fraction of successful step (see end of file) is ~0.5
+    therm.monteCarloSweep(i, s=l0/20, lmin=0.6*l0, lmax=1.3*l0) // This step size s has chosen such that the fraction of successful step (see end of file) is ~0.5
+
+    // VTKExporter(mesh).export("data/Sphere_${i}.vtk")
+    hMesh.exportVTK("data/SphereFlipHardSphere_${i}.vtk")
+}

@@ -1,0 +1,261 @@
+// Half edge mesh thermalizer
+
+import optimize
+import meshgen
+import halfedge
+import starPerpSqMeanCurvature
+import area
+import gd 
+
+class Thermalizer {
+    init(hMesh, NDIMS=3, fixed=nil, temp=1, kappa = 1e2) {
+        self.hMesh = hMesh
+        self.sps = SPSMeanCurvatureSq(h0=-1)
+        self.area = HE_Area()
+        self.sps = HE_Area()
+        self.fixed = fixed
+        self.NDIMS = NDIMS
+        self.quiet = false
+        self.temp = temp
+        self.kappa = kappa
+        self.totalEdges = hMesh.mesh.count(1)
+        print "Initial number of edges: ${self.totalEdges}"
+    }
+
+    gettarget() {
+        return self.hMesh.mesh.vertexmatrix()
+    }
+    /* Returns the Boltzmann probability for accepting a Monte Carlo move that takes the
+     system from energy ei to ef. Kb (the Boltzmann constant) is assumed to be 1 
+     all throughout this code.
+    */
+    boltzmannProbability(ei, ef) {
+        var b = exp((ei-ef)/self.temp)
+        return min(1, b)
+    }
+
+    /* This method perturbs a single vertex (indexed by vid) by a random increment
+     in the cube [-s,s]^3 
+     Inspired by Kroll & Gompper, Science, 1992
+     Inputs:
+     s : Size of the perturbation
+     vid : Index of the vertex to be perturbed
+    */
+    perturbVertex(s, vid) { 
+        
+        var disp = Matrix(3, self.hMesh.mesh.count())
+        if (self.NDIMS==3) {
+            disp.setcolumn(vid, 2*s * Matrix([random()-0.5, random()-0.5, random()-0.5]))
+        }
+        else {
+            disp.setcolumn(vid, 2*s * Matrix([random()-0.5, random()-0.5, 0]))
+        }
+
+        var target = self.gettarget()
+
+        target.acc(1, disp) // Take a step
+        self.perturbation = disp
+        
+    }
+
+    energyAt(vid) {
+        return self.kappa * self.sps.integrandForStar(self.hMesh, vid)
+    }
+
+    overlapEnergyAt(vid, lmin, lmax) {
+        var vert = self.gettarget()
+        var v0 = vert.column(vid) 
+        var vNbr, bondLength
+        for (nbr in self.hMesh.getNeighbors(vid)[0]) {
+            vNbr = vert.column(nbr)
+            bondLength = (vNbr-v0).norm()
+            if (bondLength<lmin || bondLength>lmax) {
+                // print "Perturbation causes bad new bond!"
+                return self.kappa*1e10 // If any of the bonds break this condition, return a very large number (compared to kappa)
+            }
+        }
+        // If none of the bonds are bad, return 0
+        return 0
+    }
+    energyAtEdge(eid) {
+        return self.kappa * self.sps.integrandForFlip(self.hMesh, eid)
+    }
+    monteCarloSweep(iter, s=0.001, lmin=0, lmax=100, report=true) {
+
+        var moveSuccesses = 0
+        var flipSuccesses = 0
+        var movablePts = Selection(self.hMesh.mesh, fn(x,y,z) true)
+
+        if (isselection(self.fixed)) {
+            for (vid in self.fixed.idlistforgrade(0)) movablePts[0, vid] = false 
+        }
+
+        var eni, enf, deltaE
+
+        var validPts = movablePts.idlistforgrade(0)
+        var nPts = validPts.count()
+        var vid
+        var sc = 1
+        for (vid in movablePts.idlistforgrade(0)) {
+        // for (trial in 0...sc*nPts) {
+            
+            // vid = randomint(nPts)
+            // Compute initial energy due to vertex vid
+            eni = self.energyAt(vid)
+            // Perturb the vertex
+            self.perturbVertex(s, vid)
+            // Compute new energy
+            enf = self.energyAt(vid)
+
+            enf += self.overlapEnergyAt(vid, lmin, lmax)
+
+            if (random()>self.boltzmannProbability(eni,enf)) {
+                // Don't accept the move
+                self.gettarget().acc(-1, self.perturbation) // Take a step
+            }
+            else {
+                // Move is accepted.
+                moveSuccesses += 1
+            }
+        }
+
+        // Now we try to flip edges 
+        var vids = [0,0,0,0], he
+        var edges =  self.hMesh.he_edges.keys()
+        var nEdges = edges.count()
+        var j, eid
+        var step = 0
+        // print "${Int(0.01/(s^2))}"
+
+        // For the flips, the vertex positions will not change, so we can precompute the vertex matrix for
+        // computing the lengths while flipping the edges
+        var vert = self.gettarget()
+        /*
+        for (flipIter in 0...5*nEdges) {
+        // for (flipIter in 0...Int(0.01/(s^2))) {
+        // for (eid, j in edges) {
+                j = randomint(nEdges)
+                eid = edges[j]
+                if (random()>0.2) continue // Flipping roughly 20% of the half-edges
+                step +=1
+                // First, get all the relevant vertices
+                // try {
+                //     he = self.hMesh.he_edges[eid]
+                // } catch {
+                //     "DctKyNtFnd" : break // This was the twin of some edge that has already been flipped
+                // }
+                if (self.hMesh.he_edges.contains(eid)) {
+                    he = self.hMesh.he_edges[eid]
+                }
+                else break
+                if (he.clss()=="@Dictionary") break
+                // print "Half edge # ${j}"
+                // print he
+                // print eid
+                vids[0] = he.vert.id 
+                vids[1] = he.next.vert.id
+                vids[2] = he.next.next.vert.id
+                vids[3] = he.twin.next.next.vert.id
+
+                // We only want to flip the edge if the new edge 2-3 satisfies the lmin-lmax conditions
+                var newBondLength = (vert.column(vids[2])-vert.column(vids[3])).norm()
+                if (newBondLength<lmin || newBondLength>lmax) {
+                    // print "lmin = ${lmin}, lmax = ${lmax}, newBondLength: ${newBondLength}"
+                    // print "Edge flip causes bad new bond!"
+                    continue
+                }
+                // Now, compute the initial energy
+                // eni = 0 
+                // for (i in 0..3) {
+                //     eni += self.energyAt(vids[i])
+                // }
+                if (self.hMesh.isBoundaryEdge(eid)) continue
+                eni = self.energyAtEdge(eid)
+                // Now, flip the edge
+                // print "Step ${step}"
+                var noFlip = false
+                try {
+                    self.hMesh.flipEdge(eid)
+                } catch {
+                    "BadEdgeError" : {
+
+                        // print "Found unflippable edge. Continuing..."
+                        noFlip = true
+                    }
+                    "BoundaryEdge" :
+                        print "Found boundary edge. Continuing..."
+                        noFlip = true
+                }
+
+                if (noFlip) continue
+                // self.hMesh.flipEdge(eid, debug=true)
+                // Now, compute the final energy
+                // enf = 0
+                // for (i in 0..3) {
+                //     enf += self.energyAt(vids[i])
+                // }
+                enf = self.energyAtEdge("${vids[2]}-${vids[3]}")
+
+                deltaE = enf - eni
+                if (random()>self.boltzmannProbability(0,deltaE)) {
+                    // Don't accept the move
+                    // print "Rejected flipped edge ${eid}!"
+                    // self.hMesh.flipEdge("${vids[2]}-${vids[3]}", debug=true) // Flip back the new edge
+                    try {
+                        self.hMesh.flipEdge("${vids[2]}-${vids[3]}") // Flip back the new edge
+                    } catch {
+                        "BadEdgeError" : {
+                            print "Couldn't reject flip move."
+                            // print "Edge ${vids[2]}-${vids[3]} seems to be bad..."
+                            // print "Plotting the mesh with labels..."
+                            // var m = self.hMesh.genMesh()
+                            // m.addgrade(1)
+                            // var s = Selection(m)
+                            // s[0, vids[2]] = 1
+                            // s[0, vids[3]] = 1
+                            // Show(plotmesh(m, grade=1) + plotmeshlabels(m, selection=s))
+                            // System.exit()
+                            continue
+                        }
+                    }
+                    // self.hMesh.flipEdge(eid)
+                    // self.hMesh.flipEdge("${vids[2]}-${vids[3]}") // Flip back the new edge
+                    // self.hMesh.exportVTK("data/step_${step}")
+
+                }
+                else {
+                    // Flip is accepted.
+                    // print "Successfully flipped edge ${eid}!"
+                    flipSuccesses += 1
+                    // var intMeshName = "data/int_${iter}_flip_${flipSuccesses}.vtk"
+                    // self.hMesh.exportVTK(intMeshName)
+                    // var inspectMesh = VTKImporter(intMeshName).mesh()
+                    // inspectMesh.addgrade(1)
+                    // if (inspectMesh.count(1)!=self.totalEdges) {
+                    //     print "Iter ${iter}, flip # ${flipSuccesses}: Lost ${self.totalEdges-inspectMesh.count(1)} edges while flipping edge ${self.hMesh.he_edges["${vids[2]}-${vids[3]}"].eid}"
+                    //     Error("EdgeLost", "Edge lost during flip!").throw()
+                    // }
+                    // self.hMesh.exportVTK("data/step_${step}")
+                }
+
+            // }
+        }
+        */
+        if (report) self.reportmc(iter, moveSuccesses/sc,flipSuccesses)
+        // for (flip in 1..flipSuccesses) {
+        //     system("rm data/int_${iter}_flip_${flip}.vtk")
+        // }
+
+    }
+
+    totalenergy() {
+        return self.kappa*self.sps.total(self.hMesh)
+    }
+    reportmc(iter, nMove, nFlip) {
+        if (!self.quiet) {
+            // print ("MC step ${iter}: Total energy: ${self.totalenergy()}, Move rate: ${nMove/self.hMesh.mesh.count()}, flip rate: ${nFlip/self.hMesh.mesh.count(1)}")
+            print ("MC step ${iter}: Total energy: ${self.totalenergy()}, Move rate: ${nMove/self.hMesh.mesh.count()}, nFlips : ${nFlip}")
+        }
+    }
+
+}

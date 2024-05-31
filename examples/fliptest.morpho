@@ -1,0 +1,36 @@
+import halfedge
+
+var mb = MeshBuilder()
+
+mb.addvertex([0,-1,0])
+mb.addvertex([0,1,0])
+mb.addvertex([-1,0,0])
+mb.addvertex([1,0,0])
+
+mb.addface([0,1,2])
+mb.addface([1,0,3])
+
+var m = mb.build()
+m.addgrade(1)
+var g = plotmesh(m, grade=1)
+g.title = "Before"
+Show(g)
+
+var halfMesh = HalfEdgeMesh(m, ndims=2)
+halfMesh.exportVTK("before")
+print "Before:"
+print m.connectivitymatrix(1,0)
+// for (k in halfMesh.he_edges.keys()) print k
+// halfMesh.flipEdge(0,1)
+halfMesh.flipEdge("0-1")
+print "After:"
+// for (k in halfMesh.he_edges.keys()) print k
+halfMesh.exportVTK("after")
+halfMesh.export("flipped.mesh")
+var mf = Mesh("flipped.mesh")
+mf.addgrade(1)
+g = plotmesh(mf, grade=1)
+g.title = "After"
+print mf.connectivitymatrix(1,0)
+print mf.connectivitymatrix(1,0).respondsto()
+Show(g)

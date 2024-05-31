@@ -1,0 +1,24 @@
+import meshtools
+import plot 
+import halfedge 
+
+var m = Mesh("disk.mesh")
+m.addgrade(1)
+fn plotwithlabels(m, title="morpho") {
+    var g = plotmesh(m, grade=1) + plotmeshlabels(m, grade=0)
+    g += plotmeshlabels(m, grade=1, color=Red)
+    g += plotmeshlabels(m, grade=2, color=Blue)
+    g.title = title
+    Show(g)
+
+}
+plotwithlabels(m, title="Before")
+
+var halfMesh = HalfEdgeMesh(m, ndims=2)
+halfMesh.equiangulate()
+
+m = halfMesh.genMesh()
+m.addgrade(1)
+plotwithlabels(m, title="After")
+ 
+ 

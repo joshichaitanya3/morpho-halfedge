@@ -1,0 +1,59 @@
+
+var m = HalfEdgeMesh(Mesh("triangle.mesh"))
+var a = HE_Area()
+
+print (a.integrand(m) - Matrix([ 1.29904 ])).norm() < 1e-5
+// expect: true
+
+print (a.gradient(m)-numericalgradient(Area(), m.mesh)).norm() < 1e-5
+// expect: true
+
+
+// Try solving the catenoid profile with this functional
+
+/* 
+
+// Set up geometrical parameters
+
+var r = 1.0 // radius
+var ratio = 0.4 // Separation to diameter ratio
+var L = 2*r*ratio // Separation
+
+// Generate a tube / cylindrical mesh
+var mesh = AreaMesh(fn (u, v) [r*cos(u), v, r*sin(u)], 
+                    -Pi...Pi:Pi/10,
+                    -L/2..L/2:L/5, 
+                    closed=[true,false]
+)
+
+mesh.addgrade(1)
+print Area().gradient(mesh).dimensions()
+var m = HalfEdgeMesh(mesh)
+// Select the boundary
+var bnd = Selection(mesh, boundary=true)
+
+var g = plotselection(mesh, bnd, grade=1)
+g.title = "Before"
+Show(g)
+
+// Define the optimizataion problem
+var problem = OptimizationProblem(m)
+// Add the area energy using the built-in Area functional
+// var area = Area()
+var area = HE_Area()
+print area.gradient(m).dimensions()
+problem.addenergy(area)
+
+// Define the optimizer
+var opt = ShapeOptimizer(problem, m)
+// Ask the optimizer to fix the boundary rings
+opt.fix(bnd)
+
+// Minimize!
+opt.conjugategradient(1000)
+
+g = plotselection(mesh, bnd, grade=1)
+g.title = "After"
+Show(g)
+
+*/
